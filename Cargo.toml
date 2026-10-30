@@ -9,6 +9,10 @@ readme = "README.md"
 keywords = ["torrent", "bittorrent", "tui", "cli", "p2p"]
 categories = ["command-line-utilities"]
 
+[workspace]
+members = ["xtask"]
+resolver = "2"
+
 [dependencies]
 anyhow = "1.0"
 async-trait = "0.1"
@@ -32,6 +36,8 @@ toml = "1.1"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-width = "0.2"
+url = "2"
 
 [dev-dependencies]
 tempfile = "3"

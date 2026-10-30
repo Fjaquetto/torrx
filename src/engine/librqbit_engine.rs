@@ -132,8 +132,16 @@ impl TorrentEngine for LibrqbitEngine {
     async fn add(&self, source: AddSource, options: AddOptions) -> Result<AddOutcome, EngineError> {
         let torrent = match &source {
             AddSource::Magnet(value) | AddSource::Url(value) => AddTorrent::from_url(value.clone()),
-            AddSource::File(path) => AddTorrent::from_local_filename(&path_to_string(path)?)
-                .map_err(|error| failed(&error))?,
+            AddSource::File(path) => {
+                if !path.is_file() {
+                    return Err(EngineError::Failed(format!(
+                        "file not found: {}",
+                        path.display()
+                    )));
+                }
+                AddTorrent::from_local_filename(&path_to_string(path)?)
+                    .map_err(|error| failed(&error))?
+            }
         };
 
         let output_folder = options

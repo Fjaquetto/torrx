@@ -9,6 +9,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, Wrap},
 };
+use unicode_width::UnicodeWidthChar;
 
 use crate::{
     app::{App, ConfirmState, InputState, Modal, Screen},
@@ -21,6 +22,8 @@ use theme as t;
 const MIN_WIDTH: u16 = 76;
 const MIN_HEIGHT: u16 = 12;
 const HEADER_HEIGHT: u16 = 6;
+const INPUT_WIDTH: u16 = 70;
+const INPUT_HEIGHT: u16 = 8;
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -465,6 +468,8 @@ fn render_help(frame: &mut Frame, area: Rect) {
         )),
         Line::from(""),
         Line::from("a            add a magnet link, URL or .torrent path"),
+        Line::from("←/→ Home/End edit the add field (ctrl+w deletes a word)"),
+        Line::from("paste        use your terminal shortcut (ctrl+shift+v)"),
         Line::from("space / p    pause, resume when paused"),
         Line::from("r            resume the selected torrent"),
         Line::from("d            remove the selected torrent"),
@@ -476,41 +481,110 @@ fn render_help(frame: &mut Frame, area: Rect) {
         Line::from("uploads run while torrx is open; keeping the window open seeds.")
             .style(Style::new().fg(t::MUTED)),
     ];
-    render_modal_floating(frame, area, 64, 14, " help ", Paragraph::new(text));
+    render_modal_floating(frame, area, 68, 16, " help ", Paragraph::new(text));
 }
 
 fn render_input(frame: &mut Frame, area: Rect, input: &InputState) {
-    let mut lines = vec![
-        Line::from(Span::styled(
-            "add torrent",
-            Style::new().fg(t::ACCENT).bold(),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::raw("> "),
-            Span::styled(input.value.clone(), Style::new().fg(t::TEXT)),
-            Span::styled("█", Style::new().fg(t::ACCENT)),
-        ]),
-    ];
+    let popup = centered_rect(area, INPUT_WIDTH, INPUT_HEIGHT);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(t::ACCENT))
+        .title(" add torrent ");
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let text_width = inner.width.saturating_sub(2) as usize;
+    let window = input_window(&input.value, input.cursor, text_width);
+
+    let input_area = Rect {
+        x: inner.x,
+        y: inner.y + 1,
+        width: inner.width,
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("> ", Style::new().fg(t::ACCENT)),
+            Span::styled(window.text, Style::new().fg(t::TEXT)),
+        ])),
+        input_area,
+    );
+    frame.set_cursor_position((inner.x + 2 + window.cursor_column as u16, input_area.y));
+
     if let Some(error) = &input.error {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            error.clone(),
-            Style::new().fg(t::ERROR),
-        )));
+        frame.render_widget(
+            Paragraph::new(Span::styled(error.clone(), Style::new().fg(t::ERROR))),
+            Rect {
+                y: inner.y + 3,
+                ..input_area
+            },
+        );
     }
-    lines.push(Line::from(""));
-    lines.push(
-        Line::from("enter to add · esc to cancel".to_owned()).style(Style::new().fg(t::MUTED)),
+
+    frame.render_widget(
+        Paragraph::new("enter add · esc cancel · ←/→ home/end · ctrl+u clear")
+            .style(Style::new().fg(t::MUTED)),
+        Rect {
+            y: inner.y + inner.height.saturating_sub(1),
+            ..input_area
+        },
     );
-    render_modal_floating(
-        frame,
-        area,
-        70,
-        8,
-        " add torrent ",
-        Paragraph::new(lines).wrap(Wrap { trim: false }),
-    );
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputWindow {
+    pub text: String,
+    pub cursor_column: usize,
+}
+
+pub fn input_window(value: &str, cursor: usize, width: usize) -> InputWindow {
+    if width == 0 {
+        return InputWindow {
+            text: String::new(),
+            cursor_column: 0,
+        };
+    }
+
+    let chars: Vec<char> = value.chars().collect();
+    let cursor = cursor.min(chars.len());
+    let char_width = |c: char| UnicodeWidthChar::width(c).unwrap_or(0);
+
+    let cursor_width: usize = chars[..cursor].iter().copied().map(char_width).sum();
+    let mut start = 0;
+    let mut start_width = cursor_width;
+
+    if cursor_width >= width {
+        let mut accumulated = 0;
+        let mut index = cursor;
+        while index > 0 {
+            let char_width = char_width(chars[index - 1]);
+            if accumulated + char_width > width - 1 {
+                break;
+            }
+            accumulated += char_width;
+            index -= 1;
+        }
+        start = index;
+        start_width = accumulated;
+    }
+
+    let mut text = String::new();
+    let mut used = 0;
+    for &character in &chars[start..] {
+        let char_width = char_width(character);
+        if used + char_width > width {
+            break;
+        }
+        text.push(character);
+        used += char_width;
+    }
+
+    InputWindow {
+        text,
+        cursor_column: start_width,
+    }
 }
 
 fn render_confirm(frame: &mut Frame, area: Rect, confirm: &ConfirmState) {
@@ -591,7 +665,7 @@ mod tests {
     }
 
     fn app() -> App {
-        let mut app = App::new("balanced", true);
+        let mut app = App::new("balanced", true, None);
         app.handle_event(AppEvent::Snapshot(Snapshot {
             global: GlobalView {
                 download_speed: 1024 * 1024,
@@ -637,7 +711,7 @@ mod tests {
 
     #[test]
     fn renders_empty_state_hint() {
-        let app = App::new("balanced", true);
+        let app = App::new("balanced", true, None);
         let screen = lines(&app, 120, 30);
         assert!(contains(&screen, "no torrents yet"));
     }
@@ -678,7 +752,7 @@ mod tests {
         app.handle_event(AppEvent::Keys(vec![Key::Char('a')]));
         let screen = lines(&app, 120, 30);
         assert!(contains(&screen, "add torrent"));
-        assert!(contains(&screen, "esc to cancel"));
+        assert!(contains(&screen, "enter add"));
     }
 
     #[test]
@@ -736,5 +810,47 @@ mod tests {
         let app = app();
         let screen = lines(&app, 40, 8);
         assert!(contains(&screen, "terminal too small"));
+    }
+
+    #[test]
+    fn input_window_scrolls_to_keep_cursor_visible() {
+        let value = "/home/user/Downloads/very-long-file-name.torrent";
+        let window = input_window(value, value.chars().count(), 24);
+        assert!(value.ends_with(&window.text));
+        assert!(window.cursor_column < 24);
+        assert!(window.text.chars().count() < value.chars().count());
+    }
+
+    #[test]
+    fn input_window_handles_wide_characters() {
+        let value = "日本語のファイル.torrent";
+        let window = input_window(value, value.chars().count(), 12);
+        assert!(window.cursor_column < 12);
+        assert_ne!(window.text, "");
+    }
+
+    #[test]
+    fn input_window_shows_the_start_when_cursor_is_home() {
+        let window = input_window("abcdefghij", 0, 4);
+        assert_eq!(window.text, "abcd");
+        assert_eq!(window.cursor_column, 0);
+    }
+
+    #[test]
+    fn input_modal_positions_the_cursor() {
+        let mut app = app();
+        app.handle_event(AppEvent::Keys(vec![Key::Char('a')]));
+        for character in "abc".chars() {
+            app.handle_event(AppEvent::Keys(vec![Key::Char(character)]));
+        }
+
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render(frame, &app))
+            .expect("renders frame");
+
+        let position = terminal.backend().cursor_position();
+        assert_eq!((position.x, position.y), (31, 13));
     }
 }

@@ -1,4 +1,7 @@
-use std::{fs, io, path::Path};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 pub fn create_private_dir(path: &Path) -> io::Result<()> {
     fs::create_dir_all(path)?;
@@ -7,6 +10,18 @@ pub fn create_private_dir(path: &Path) -> io::Result<()> {
 
 pub fn running_as_root() -> bool {
     first_uid_is_root(&read_uid_line())
+}
+
+pub fn expand_tilde(input: &str, home: Option<&Path>) -> PathBuf {
+    let Some(home) = home else {
+        return PathBuf::from(input);
+    };
+    if input == "~" {
+        return home.to_path_buf();
+    }
+    input
+        .strip_prefix("~/")
+        .map_or_else(|| PathBuf::from(input), |rest| home.join(rest))
 }
 
 fn read_uid_line() -> String {
@@ -41,6 +56,22 @@ mod tests {
     fn detects_root_uid() {
         assert!(first_uid_is_root("Name:\ttorrx\nUid:\t0\t0\t0\t0\n"));
         assert!(first_uid_is_root("Uid: 0 1000 1000 1000"));
+    }
+
+    #[test]
+    fn expands_tilde_against_home() {
+        let home = Path::new("/home/user");
+        assert_eq!(
+            expand_tilde("~/dl", Some(home)),
+            PathBuf::from("/home/user/dl")
+        );
+        assert_eq!(expand_tilde("~", Some(home)), PathBuf::from("/home/user"));
+        assert_eq!(expand_tilde("/abs", Some(home)), PathBuf::from("/abs"));
+        assert_eq!(
+            expand_tilde("~other/x", Some(home)),
+            PathBuf::from("~other/x")
+        );
+        assert_eq!(expand_tilde("~/dl", None), PathBuf::from("~/dl"));
     }
 
     #[test]

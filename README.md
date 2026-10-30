@@ -1,5 +1,7 @@
 # torrx
 
+[![ci](https://github.com/Fjaquetto/torrx/actions/workflows/ci.yml/badge.svg)](https://github.com/Fjaquetto/torrx/actions/workflows/ci.yml)
+
 Fast, secure and minimal BitTorrent client for the terminal.
 
 `torrx` downloads and seeds torrents with a clean, keyboard-driven TUI: progress
@@ -54,6 +56,8 @@ too) show every command, argument and flag.
 | Key | Action |
 | --- | --- |
 | `a` | add a magnet link, URL or `.torrent` path |
+| `←` `→` `Home` `End` | move the cursor while typing a source |
+| `Ctrl+W` / `Ctrl+U` | delete the previous word / clear the add field |
 | `space` / `p` | pause, resume when paused |
 | `r` | resume the selected torrent |
 | `d` | remove the selected torrent |
@@ -61,6 +65,11 @@ too) show every command, argument and flag.
 | `↑` `↓` `PgUp` `PgDn` | move through the list |
 | `?` | help overlay |
 | `q` / `ctrl-c` | quit |
+
+In the add dialog, paste with your terminal shortcut (`Ctrl+Shift+V`, right
+click, middle click) — torrx enables bracketed paste, so paths with spaces and
+long lines arrive intact. Sources can be absolute, relative, quoted, `~/...` or
+`file:///...` URLs.
 
 In the detail screen `space` includes/excludes the file under the cursor and
 `esc` goes back.
@@ -173,7 +182,8 @@ src/
 ├── runtime/             # event loop, engine polling, headless commands
 ├── paths.rs, logging.rs
 examples/                # create_torrent, preview (dev tools)
-tests/e2e_seed_leech.rs  # real seed→leech→seed transfer over loopback
+xtask/                   # release helpers (version bump + changelog), tested
+tests/                   # config loading, headless flow, offline e2e transfer
 ```
 
 Design rules:
@@ -183,6 +193,19 @@ Design rules:
 - `app` is a pure state machine: `handle_event` returns the effects to run, so
   the whole interaction model is unit-tested without a terminal.
 - Comments are rare on purpose; naming carries the intent.
+
+## Releases
+
+Merging `develop` into `main` runs `.github/workflows/release.yml`: it validates
+the tree, analyzes Conventional Commits since the last tag, bumps `Cargo.toml`,
+updates `CHANGELOG.md`, creates an annotated `vX.Y.Z` tag and publishes the
+GitHub release with Linux (gnu/musl, x86_64/aarch64), macOS (x86_64/arm64) and
+Windows binaries plus `sha256` checksums. A back-merge keeps `develop` in sync.
+The first release (`v0.1.0`) is tagged manually to bootstrap the sequence.
+
+The bot pushes the release commit to `main`/`develop`, so GitHub Actions needs a
+ruleset bypass on those branches (or a `RELEASE_TOKEN` secret with the bypass).
+The release body is generated from Conventional Commits by `cargo xtask`.
 
 ## Roadmap
 
@@ -195,14 +218,16 @@ Design rules:
 ## Tests
 
 ```sh
-cargo test              # unit + integration (the e2e is offline and deterministic)
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
+cargo test --workspace --all-targets   # unit + integration + xtask (offline)
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all --check
 ```
 
 Covered by tests: formatting edge cases (0 B, NaN, huge ETA), config validation
-and precedence, profile presets, selector resolution by id/hash prefix, torrent
-and file state mapping, the app state machine (selections, modals, auto-pause,
-status expiry), CLI parsing, key mapping, rendered TUI frames (`TestBackend`) and
-a real end-to-end transfer: a seeder, a leecher, and a second leecher that
+and precedence (including real file loading), profile presets, source parsing
+(`~`, quotes, `file://`), selector resolution by id/hash prefix, torrent and file
+state mapping, the app state machine (selections, modals, paste editing,
+auto-pause, status expiry), CLI parsing, key mapping, rendered TUI frames and
+cursor placement (`TestBackend`), the release version/changelog logic (`xtask`)
+and a real end-to-end transfer: a seeder, a leecher, and a second leecher that
 downloads exclusively from the first one.

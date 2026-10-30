@@ -1,0 +1,195 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag existente para reconstruir os artefatos (vazio = analisa a main)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    name: validate main
+    if: >-
+      github.event_name == 'push' &&
+      !contains(github.event.head_commit.message, '[skip ci]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --all-targets --locked
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  prepare:
+    name: analyze + bump + tag + notes
+    needs: validate
+    if: >-
+      always() &&
+      (github.event_name == 'workflow_dispatch' ||
+       (needs.validate.result == 'success' &&
+        !contains(github.event.head_commit.message, '[skip ci]')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    outputs:
+      should_release: ${{ steps.release.outputs.should_release }}
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Plan release
+        id: release
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${REQUESTED_TAG:-}" ]; then
+            echo "tag=$REQUESTED_TAG" >> "$GITHUB_OUTPUT"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! plan=$(cargo xtask next-version); then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "no release-worthy commits since the last tag"
+            exit 0
+          fi
+          version=$(jq -r .version <<<"$plan")
+          base=$(jq -r .base <<<"$plan")
+          tag="v$version"
+
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "tag $tag already exists; skipping"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          cargo xtask bump "$version"
+          cargo metadata --format-version 1 > /dev/null
+          cargo xtask changelog --from "$base" --version "$tag" --update CHANGELOG.md > /dev/null
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock CHANGELOG.md
+          git commit -m "chore(release): $tag [skip ci]"
+          git tag -a "$tag" -m "torrx $tag"
+          # The bot pushes to main; allow GitHub Actions in the branch ruleset
+          # (or provide RELEASE_TOKEN with bypass).
+          git push origin HEAD:main --follow-tags
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure GitHub release exists
+        if: steps.release.outputs.should_release == 'true'
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists"
+            exit 0
+          fi
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            git checkout --detach "$TAG"
+          fi
+          base=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$TAG^" 2>/dev/null || echo v0.0.0)
+          cargo xtask changelog --from "$base" --version "$TAG" > release-notes.md
+          flags=(--title "torrx $TAG" --notes-file release-notes.md --verify-tag)
+          case "$TAG" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$TAG" "${flags[@]}"
+
+  build:
+    name: ${{ matrix.target }}
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-22.04
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-pc-windows-msvc
+            os: windows-2022
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: torrx
+          target: ${{ matrix.target }}
+          locked: true
+          checksum: sha256
+          include: LICENSE,README.md
+          leading-dir: true
+          archive: torrx-$tag-$target
+          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+  sync-develop:
+    name: back-merge main -> develop
+    needs: [prepare, build]
+    if: >-
+      needs.prepare.outputs.should_release == 'true' &&
+      github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+      - name: Merge release commit into develop
+        run: |
+          set -euo pipefail
+          git fetch origin main develop
+          git checkout develop
+          git merge --no-edit "${{ needs.prepare.outputs.tag }}"
+          git push origin develop

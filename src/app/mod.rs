@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use crate::domain::{
     GlobalView, Snapshot, SpeedHistory, TorrentDetails, TorrentId, TorrentStatus, TorrentView,
@@ -7,6 +10,7 @@ use crate::engine::{AddOutcome, AddSource, EngineError};
 
 const STATUS_TTL: Duration = Duration::from_secs(5);
 const HISTORY_CAPACITY: usize = 120;
+const MAX_INPUT_LEN: usize = 8192;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
@@ -14,6 +18,9 @@ pub enum Key {
     Enter,
     Esc,
     Backspace,
+    Delete,
+    Left,
+    Right,
     Up,
     Down,
     PageUp,
@@ -22,6 +29,7 @@ pub enum Key {
     End,
     CtrlC,
     CtrlU,
+    CtrlW,
     Other,
 }
 
@@ -34,7 +42,103 @@ pub enum Screen {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InputState {
     pub value: String,
+    pub cursor: usize,
     pub error: Option<String>,
+}
+
+impl InputState {
+    pub fn new(value: impl Into<String>) -> Self {
+        let value = value.into();
+        let cursor = value.chars().count();
+        Self {
+            value,
+            cursor,
+            error: None,
+        }
+    }
+
+    pub fn char_count(&self) -> usize {
+        self.value.chars().count()
+    }
+
+    pub fn insert_char(&mut self, c: char) {
+        let mut buffer = [0; 4];
+        self.insert_str(c.encode_utf8(&mut buffer));
+    }
+
+    pub fn insert_str(&mut self, text: &str) {
+        let index = self.byte_index(self.cursor);
+        self.value.insert_str(index, text);
+        self.cursor += text.chars().count();
+        self.error = None;
+    }
+
+    pub fn backspace(&mut self) -> bool {
+        if self.cursor == 0 {
+            return false;
+        }
+        let index = self.byte_index(self.cursor - 1);
+        self.value.remove(index);
+        self.cursor -= 1;
+        self.error = None;
+        true
+    }
+
+    pub fn delete(&mut self) -> bool {
+        if self.cursor >= self.char_count() {
+            return false;
+        }
+        let index = self.byte_index(self.cursor);
+        self.value.remove(index);
+        self.error = None;
+        true
+    }
+
+    pub fn move_left(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    pub fn move_right(&mut self) {
+        self.cursor = (self.cursor + 1).min(self.char_count());
+    }
+
+    pub fn home(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub fn end(&mut self) {
+        self.cursor = self.char_count();
+    }
+
+    pub fn delete_word_back(&mut self) {
+        while self.cursor > 0 && self.char_before(self.cursor).is_whitespace() {
+            self.backspace();
+        }
+        while self.cursor > 0 && !self.char_before(self.cursor).is_whitespace() {
+            self.backspace();
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.value.clear();
+        self.cursor = 0;
+        self.error = None;
+    }
+
+    pub fn set_error(&mut self, error: impl Into<String>) {
+        self.error = Some(error.into());
+    }
+
+    fn char_before(&self, char_index: usize) -> char {
+        self.value.chars().nth(char_index - 1).unwrap_or(' ')
+    }
+
+    fn byte_index(&self, char_index: usize) -> usize {
+        self.value
+            .char_indices()
+            .nth(char_index)
+            .map_or(self.value.len(), |(index, _)| index)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +217,8 @@ pub enum AppEvent {
     Snapshot(Snapshot),
     Details(Result<TorrentDetails, EngineError>),
     Action(Result<ActionOk, EngineError>),
+    AddFailed { source: AddSource, error: String },
+    Paste(String),
     Keys(Vec<Key>),
     Tick,
 }
@@ -131,10 +237,11 @@ pub struct App {
     seed_after_complete: bool,
     pending_select: Option<TorrentId>,
     auto_paused: Vec<TorrentId>,
+    home: Option<PathBuf>,
 }
 
 impl App {
-    pub fn new(profile: &str, seed_after_complete: bool) -> Self {
+    pub fn new(profile: &str, seed_after_complete: bool, home: Option<PathBuf>) -> Self {
         Self {
             torrents: Vec::new(),
             global: GlobalView::default(),
@@ -149,6 +256,7 @@ impl App {
             seed_after_complete,
             pending_select: None,
             auto_paused: Vec::new(),
+            home,
         }
     }
 
@@ -157,6 +265,8 @@ impl App {
             AppEvent::Snapshot(snapshot) => self.on_snapshot(snapshot),
             AppEvent::Details(result) => self.on_details(result),
             AppEvent::Action(result) => self.on_action(result),
+            AppEvent::AddFailed { source, error } => self.on_add_failed(&source, error),
+            AppEvent::Paste(text) => self.on_paste(&text),
             AppEvent::Keys(keys) => keys.into_iter().flat_map(|key| self.on_key(key)).collect(),
             AppEvent::Tick => self.on_tick(),
         }
@@ -283,6 +393,24 @@ impl App {
                 Vec::new()
             }
         }
+    }
+
+    fn on_paste(&mut self, text: &str) -> Vec<Effect> {
+        let Some(Modal::Input(state)) = self.modal.as_mut() else {
+            return Vec::new();
+        };
+        match sanitize_paste(text) {
+            Ok(text) => state.insert_str(&text),
+            Err(error) => state.set_error(error),
+        }
+        Vec::new()
+    }
+
+    fn on_add_failed(&mut self, source: &AddSource, error: String) -> Vec<Effect> {
+        let mut state = InputState::new(source.display());
+        state.set_error(error);
+        self.modal = Some(Modal::Input(state));
+        Vec::new()
     }
 
     fn on_tick(&mut self) -> Vec<Effect> {
@@ -448,34 +576,47 @@ impl App {
             }
             Modal::Input(mut state) => match key {
                 Key::Esc => (None, Vec::new()),
-                Key::Enter => {
-                    let value = state.value.trim().to_owned();
-                    if value.is_empty() {
-                        state.error = Some(
-                            "enter a magnet link, an http(s) URL or a .torrent path".to_owned(),
-                        );
+                Key::Enter => match AddSource::parse(state.value.trim(), self.home.as_deref()) {
+                    Ok(source) => (None, vec![Effect::Add { source }]),
+                    Err(error) => {
+                        state.set_error(error.to_string());
                         (Some(Modal::Input(state)), Vec::new())
-                    } else {
-                        (
-                            None,
-                            vec![Effect::Add {
-                                source: AddSource::classify(&value),
-                            }],
-                        )
                     }
-                }
+                },
                 Key::Backspace => {
-                    state.value.pop();
+                    state.backspace();
+                    (Some(Modal::Input(state)), Vec::new())
+                }
+                Key::Delete => {
+                    state.delete();
+                    (Some(Modal::Input(state)), Vec::new())
+                }
+                Key::Left => {
+                    state.move_left();
+                    (Some(Modal::Input(state)), Vec::new())
+                }
+                Key::Right => {
+                    state.move_right();
+                    (Some(Modal::Input(state)), Vec::new())
+                }
+                Key::Home => {
+                    state.home();
+                    (Some(Modal::Input(state)), Vec::new())
+                }
+                Key::End => {
+                    state.end();
+                    (Some(Modal::Input(state)), Vec::new())
+                }
+                Key::CtrlW => {
+                    state.delete_word_back();
                     (Some(Modal::Input(state)), Vec::new())
                 }
                 Key::CtrlU => {
-                    state.value.clear();
-                    state.error = None;
+                    state.clear();
                     (Some(Modal::Input(state)), Vec::new())
                 }
                 Key::Char(c) => {
-                    state.value.push(c);
-                    state.error = None;
+                    state.insert_char(c);
                     (Some(Modal::Input(state)), Vec::new())
                 }
                 _ => (Some(Modal::Input(state)), Vec::new()),
@@ -504,6 +645,23 @@ impl App {
     }
 }
 
+fn sanitize_paste(text: &str) -> Result<String, &'static str> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("nothing to paste");
+    }
+    if trimmed.contains('\n') || trimmed.contains('\r') {
+        return Err("paste contains more than one line");
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err("paste contains control characters");
+    }
+    if trimmed.chars().count() > MAX_INPUT_LEN {
+        return Err("pasted text is too long");
+    }
+    Ok(trimmed.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,7 +687,7 @@ mod tests {
     }
 
     fn app_with(torrents: Vec<TorrentView>) -> App {
-        let mut app = App::new("balanced", true);
+        let mut app = App::new("balanced", true, None);
         app.handle_event(AppEvent::Snapshot(Snapshot {
             global: GlobalView::default(),
             torrents,
@@ -708,7 +866,7 @@ mod tests {
 
     #[test]
     fn auto_pauses_finished_torrents_when_seeding_is_off() {
-        let mut app = App::new("private", false);
+        let mut app = App::new("private", false, None);
         let effects = app.handle_event(AppEvent::Snapshot(Snapshot {
             global: GlobalView::default(),
             torrents: vec![torrent(1, "a", TorrentStatus::Seeding)],
@@ -724,7 +882,7 @@ mod tests {
 
     #[test]
     fn keeps_seeding_when_enabled() {
-        let mut app = App::new("balanced", true);
+        let mut app = App::new("balanced", true, None);
         let effects = app.handle_event(AppEvent::Snapshot(Snapshot {
             global: GlobalView::default(),
             torrents: vec![torrent(1, "a", TorrentStatus::Seeding)],
@@ -765,5 +923,107 @@ mod tests {
         assert_eq!(app.modal, Some(Modal::Help));
         keys(&mut app, &[Key::Esc]);
         assert_eq!(app.modal, None);
+    }
+
+    fn input_app(home: Option<&str>) -> App {
+        let mut app = App::new("balanced", true, home.map(PathBuf::from));
+        keys(&mut app, &[Key::Char('a')]);
+        app
+    }
+
+    fn input_value(app: &App) -> &InputState {
+        let Some(Modal::Input(state)) = app.modal.as_ref() else {
+            panic!("expected input modal");
+        };
+        state
+    }
+
+    #[test]
+    fn input_cursor_inserts_and_deletes_in_the_middle() {
+        let mut app = input_app(None);
+        for c in "abcd".chars() {
+            keys(&mut app, &[Key::Char(c)]);
+        }
+        keys(&mut app, &[Key::Left, Key::Left, Key::Char('X')]);
+        assert_eq!(input_value(&app).value, "abXcd");
+        assert_eq!(input_value(&app).cursor, 3);
+
+        keys(&mut app, &[Key::Backspace]);
+        assert_eq!(input_value(&app).value, "abcd");
+        keys(&mut app, &[Key::Delete, Key::Home, Key::Delete]);
+        assert_eq!(input_value(&app).value, "bd");
+        keys(&mut app, &[Key::End, Key::Delete]);
+        assert_eq!(input_value(&app).value, "bd");
+    }
+
+    #[test]
+    fn input_ctrl_w_deletes_previous_word() {
+        let mut app = input_app(None);
+        for c in "/tmp/some file.torrent".chars() {
+            keys(&mut app, &[Key::Char(c)]);
+        }
+        keys(&mut app, &[Key::CtrlW]);
+        assert_eq!(input_value(&app).value, "/tmp/some ");
+        keys(&mut app, &[Key::CtrlU]);
+        assert_eq!(input_value(&app).value, "");
+    }
+
+    #[test]
+    fn input_cursor_is_unicode_safe() {
+        let mut app = input_app(None);
+        for c in "áéí".chars() {
+            keys(&mut app, &[Key::Char(c)]);
+        }
+        keys(&mut app, &[Key::Left, Key::Char('x')]);
+        assert_eq!(input_value(&app).value, "áéxí");
+        assert_eq!(input_value(&app).cursor, 3);
+    }
+
+    #[test]
+    fn paste_inserts_at_cursor_and_validates_content() {
+        let mut app = input_app(None);
+        for c in "ab".chars() {
+            keys(&mut app, &[Key::Char(c)]);
+        }
+        keys(&mut app, &[Key::Left]);
+        app.handle_event(AppEvent::Paste("XY".to_owned()));
+        assert_eq!(input_value(&app).value, "aXYb");
+
+        app.handle_event(AppEvent::Paste("line1\nline2".to_owned()));
+        assert_eq!(
+            input_value(&app).error.as_deref(),
+            Some("paste contains more than one line")
+        );
+
+        app.handle_event(AppEvent::Paste("ok\n".to_owned()));
+        assert_eq!(input_value(&app).value, "aXYokb");
+    }
+
+    #[test]
+    fn enter_normalizes_tilde_and_quotes() {
+        let mut app = input_app(Some("/home/user"));
+        app.handle_event(AppEvent::Paste("\"~/Downloads/x.torrent\"".to_owned()));
+        assert_eq!(
+            keys(&mut app, &[Key::Enter]),
+            vec![Effect::Add {
+                source: AddSource::File(PathBuf::from("/home/user/Downloads/x.torrent"))
+            }]
+        );
+    }
+
+    #[test]
+    fn add_failure_reopens_the_dialog_with_the_error() {
+        let mut app = app_with(vec![]);
+        app.handle_event(AppEvent::AddFailed {
+            source: AddSource::File(PathBuf::from("/missing.torrent")),
+            error: "file not found: /missing.torrent".to_owned(),
+        });
+        let state = input_value(&app);
+        assert_eq!(state.value, "/missing.torrent");
+        assert_eq!(state.cursor, state.value.chars().count());
+        assert_eq!(
+            state.error.as_deref(),
+            Some("file not found: /missing.torrent")
+        );
     }
 }

@@ -2,10 +2,16 @@ mod commands;
 
 pub use commands::run_command;
 
-use std::{sync::Arc, time::Duration};
+use std::{io::stdout, sync::Arc, time::Duration};
 
 use anyhow::Context;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::{
+    event::{
+        DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent,
+        KeyEventKind, KeyModifiers,
+    },
+    execute,
+};
 use futures_util::StreamExt;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
@@ -13,7 +19,7 @@ use crate::{
     app::{ActionOk, App, AppEvent, Effect, Key},
     config::Config,
     engine::{AddOptions, EngineError, LibrqbitEngine, TorrentEngine},
-    paths::AppDirs,
+    paths::{self, AppDirs},
     platform, ui,
 };
 
@@ -36,11 +42,13 @@ pub async fn run_tui(config: &Config, dirs: &AppDirs) -> anyhow::Result<()> {
     let (tx, mut rx) = mpsc::channel::<AppEvent>(CHANNEL_CAPACITY);
     spawn_poller(engine.clone(), tx.clone());
 
-    let mut app = App::new(config.profile.as_str(), config.seed);
+    let mut app = App::new(config.profile.as_str(), config.seed, paths::home_dir());
     let mut terminal = ratatui::try_init().context(
         "cannot start the terminal UI; run a subcommand such as `torrx list` when there is no TTY",
     )?;
+    let paste_guard = BracketedPasteGuard::enable();
     let result = event_loop(&mut terminal, &engine, tx, &mut rx, &mut app).await;
+    drop(paste_guard);
     ratatui::restore();
     engine.shutdown().await;
 
@@ -82,6 +90,21 @@ impl TerminationSignal {
 
     async fn wait(&mut self) {
         std::future::pending::<()>().await;
+    }
+}
+
+struct BracketedPasteGuard;
+
+impl BracketedPasteGuard {
+    fn enable() -> Self {
+        let _ = execute!(stdout(), EnableBracketedPaste);
+        Self
+    }
+}
+
+impl Drop for BracketedPasteGuard {
+    fn drop(&mut self) {
+        let _ = execute!(stdout(), DisableBracketedPaste);
     }
 }
 
@@ -143,11 +166,18 @@ fn spawn_poller(engine: Arc<dyn TorrentEngine>, tx: Sender<AppEvent>) {
 async fn execute_effect(effect: Effect, engine: &Arc<dyn TorrentEngine>, tx: &Sender<AppEvent>) {
     match effect {
         Effect::Add { source } => {
+            let failed_source = source.clone();
             let engine = engine.clone();
             let tx = tx.clone();
             tokio::spawn(async move {
-                let result = engine.add(source, AddOptions::default()).await;
-                let _ = tx.send(AppEvent::Action(result.map(ActionOk::Added))).await;
+                let event = match engine.add(source, AddOptions::default()).await {
+                    Ok(outcome) => AppEvent::Action(Ok(ActionOk::Added(outcome))),
+                    Err(error) => AppEvent::AddFailed {
+                        source: failed_source,
+                        error: error.to_string(),
+                    },
+                };
+                let _ = tx.send(event).await;
             });
         }
         Effect::Pause(id) => {
@@ -196,6 +226,7 @@ fn terminal_event_to_app(event: &Event) -> Option<AppEvent> {
         Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
             Some(AppEvent::Keys(vec![map_key(*key)]))
         }
+        Event::Paste(text) => Some(AppEvent::Paste(text.clone())),
         Event::Resize(_, _) => Some(AppEvent::Tick),
         _ => None,
     }
@@ -203,13 +234,20 @@ fn terminal_event_to_app(event: &Event) -> Option<AppEvent> {
 
 fn map_key(key: KeyEvent) -> Key {
     let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
     match key.code {
         KeyCode::Char('c') if control => Key::CtrlC,
         KeyCode::Char('u') if control => Key::CtrlU,
-        KeyCode::Char(c) => Key::Char(c),
+        KeyCode::Char('w') if control => Key::CtrlW,
+        KeyCode::Char('a') if control => Key::Home,
+        KeyCode::Char('e') if control => Key::End,
+        KeyCode::Char(c) if !control && !alt => Key::Char(c),
         KeyCode::Enter => Key::Enter,
         KeyCode::Esc => Key::Esc,
         KeyCode::Backspace => Key::Backspace,
+        KeyCode::Delete => Key::Delete,
+        KeyCode::Left => Key::Left,
+        KeyCode::Right => Key::Right,
         KeyCode::Up => Key::Up,
         KeyCode::Down => Key::Down,
         KeyCode::PageUp => Key::PageUp,
@@ -283,7 +321,7 @@ mod tests {
 
         execute_effect(
             Effect::Add {
-                source: AddSource::classify("magnet:?xt=urn:btih:aa"),
+                source: AddSource::parse("magnet:?xt=urn:btih:aa", None).expect("valid magnet"),
             },
             &engine,
             &tx,
@@ -294,7 +332,7 @@ mod tests {
             .await
             .expect("add reports back")
             .expect("action event");
-        assert!(matches!(event, AppEvent::Action(Err(_))));
+        assert!(matches!(event, AppEvent::AddFailed { .. }));
     }
 
     #[test]
@@ -307,6 +345,37 @@ mod tests {
             map_key(key(KeyCode::Char('u'), KeyModifiers::CONTROL)),
             Key::CtrlU
         );
+        assert_eq!(
+            map_key(key(KeyCode::Char('w'), KeyModifiers::CONTROL)),
+            Key::CtrlW
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Char('a'), KeyModifiers::CONTROL)),
+            Key::Home
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Char('e'), KeyModifiers::CONTROL)),
+            Key::End
+        );
+    }
+
+    #[test]
+    fn control_letters_never_become_text() {
+        assert_eq!(
+            map_key(key(KeyCode::Char('v'), KeyModifiers::CONTROL)),
+            Key::Other
+        );
+        assert_eq!(
+            map_key(key(
+                KeyCode::Char('v'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )),
+            Key::Other
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Char('x'), KeyModifiers::ALT)),
+            Key::Other
+        );
     }
 
     #[test]
@@ -318,11 +387,25 @@ mod tests {
         assert_eq!(map_key(key(KeyCode::Enter, KeyModifiers::NONE)), Key::Enter);
         assert_eq!(map_key(key(KeyCode::Esc, KeyModifiers::NONE)), Key::Esc);
         assert_eq!(map_key(key(KeyCode::Up, KeyModifiers::NONE)), Key::Up);
+        assert_eq!(map_key(key(KeyCode::Left, KeyModifiers::NONE)), Key::Left);
+        assert_eq!(map_key(key(KeyCode::Right, KeyModifiers::NONE)), Key::Right);
+        assert_eq!(
+            map_key(key(KeyCode::Delete, KeyModifiers::NONE)),
+            Key::Delete
+        );
         assert_eq!(
             map_key(key(KeyCode::PageDown, KeyModifiers::NONE)),
             Key::PageDown
         );
         assert_eq!(map_key(key(KeyCode::F(5), KeyModifiers::NONE)), Key::Other);
+    }
+
+    #[test]
+    fn maps_bracketed_paste_events() {
+        assert!(matches!(
+            terminal_event_to_app(&Event::Paste("/tmp/a.torrent".to_owned())),
+            Some(AppEvent::Paste(text)) if text == "/tmp/a.torrent"
+        ));
     }
 
     #[test]

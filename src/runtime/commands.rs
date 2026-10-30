@@ -8,7 +8,7 @@ use crate::{
     domain::TorrentDetails,
     engine::{AddOptions, AddSource, LibrqbitEngine, TorrentEngine},
     format,
-    paths::AppDirs,
+    paths::{self, AppDirs},
 };
 
 pub async fn run_command(command: Command, config: &Config, dirs: &AppDirs) -> anyhow::Result<()> {
@@ -30,7 +30,8 @@ async fn execute(engine: &dyn TorrentEngine, command: Command) -> anyhow::Result
     match command {
         Command::Add { sources, paused } => {
             for source in sources {
-                let add = AddSource::classify(&source);
+                let add = AddSource::parse(&source, paths::home_dir().as_deref())
+                    .map_err(|error| anyhow::anyhow!("{error}"))?;
                 let outcome = engine
                     .add(
                         add,

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::paths::{self, AppDirs};
+use crate::platform;
 
 const DEFAULT_PEER_LIMIT: (usize, usize) = (1, 10_000);
 const LOG_LEVELS: [&str; 5] = ["trace", "debug", "info", "warn", "error"];
@@ -183,7 +184,7 @@ pub fn resolve(
         .or_else(|| {
             file.download_dir
                 .as_deref()
-                .map(|dir| expand_tilde(dir, home))
+                .map(|dir| platform::expand_tilde(dir, home))
         })
         .unwrap_or(default_download_dir);
 
@@ -242,18 +243,6 @@ fn resolve_log_level(file_level: Option<&str>, cli: &CliOverrides) -> Result<Str
         return Err(ConfigError::LogLevel(level.to_owned()));
     }
     Ok(normalized)
-}
-
-fn expand_tilde(input: &str, home: Option<&Path>) -> PathBuf {
-    let Some(home) = home else {
-        return PathBuf::from(input);
-    };
-    if input == "~" {
-        return home.to_path_buf();
-    }
-    input
-        .strip_prefix("~/")
-        .map_or_else(|| PathBuf::from(input), |rest| home.join(rest))
 }
 
 #[cfg(test)]

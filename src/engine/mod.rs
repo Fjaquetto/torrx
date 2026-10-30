@@ -6,12 +6,19 @@ pub mod fake;
 
 pub use librqbit_engine::LibrqbitEngine;
 
-use std::{net::SocketAddr, path::PathBuf};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 use async_trait::async_trait;
 use thiserror::Error;
+use url::Url;
 
 use crate::domain::{SelectorError, Snapshot, TorrentDetails, TorrentId, resolve_selector};
+use crate::platform;
+
+const MAX_SOURCE_LEN: usize = 8192;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum EngineError {
@@ -23,6 +30,18 @@ pub enum EngineError {
     NonUtf8Path(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum SourceError {
+    #[error("source is empty")]
+    Empty,
+    #[error("source is too long (max {MAX_SOURCE_LEN} characters)")]
+    TooLong,
+    #[error("source contains control characters")]
+    ControlCharacters,
+    #[error("invalid file URL: {0}")]
+    InvalidFileUrl(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AddSource {
     Magnet(String),
@@ -31,15 +50,33 @@ pub enum AddSource {
 }
 
 impl AddSource {
-    pub fn classify(input: &str) -> Self {
-        let value = input.trim();
-        if value.starts_with("magnet:") {
-            Self::Magnet(value.to_owned())
-        } else if value.starts_with("http://") || value.starts_with("https://") {
-            Self::Url(value.to_owned())
-        } else {
-            Self::File(PathBuf::from(value))
+    pub fn parse(input: &str, home: Option<&Path>) -> Result<Self, SourceError> {
+        let value = strip_wrapping_quotes(input.trim()).trim();
+
+        if value.is_empty() {
+            return Err(SourceError::Empty);
         }
+        if value.chars().count() > MAX_SOURCE_LEN {
+            return Err(SourceError::TooLong);
+        }
+        if value.chars().any(char::is_control) {
+            return Err(SourceError::ControlCharacters);
+        }
+        if value.starts_with("magnet:") {
+            return Ok(Self::Magnet(value.to_owned()));
+        }
+        if value.starts_with("file://") {
+            let url = Url::parse(value)
+                .map_err(|error| SourceError::InvalidFileUrl(error.to_string()))?;
+            let path = url
+                .to_file_path()
+                .map_err(|()| SourceError::InvalidFileUrl("not a local file path".to_owned()))?;
+            return Ok(Self::File(path));
+        }
+        if value.starts_with("http://") || value.starts_with("https://") {
+            return Ok(Self::Url(value.to_owned()));
+        }
+        Ok(Self::File(platform::expand_tilde(value, home)))
     }
 
     pub fn display(&self) -> String {
@@ -48,6 +85,15 @@ impl AddSource {
             Self::File(path) => path.display().to_string(),
         }
     }
+}
+
+fn strip_wrapping_quotes(value: &str) -> &str {
+    for quote in ['"', '\''] {
+        if value.len() >= 2 && value.starts_with(quote) && value.ends_with(quote) {
+            return &value[1..value.len() - 1];
+        }
+    }
+    value
 }
 
 #[derive(Debug, Clone, Default)]
@@ -94,28 +140,79 @@ pub trait TorrentEngine: Send + Sync {
 mod tests {
     use super::*;
 
+    fn parse(input: &str) -> Result<AddSource, SourceError> {
+        AddSource::parse(input, Some(Path::new("/home/user")))
+    }
+
     #[test]
-    fn classifies_magnet_links() {
+    fn parses_magnet_links() {
         assert_eq!(
-            AddSource::classify(" magnet:?xt=urn:btih:aa "),
-            AddSource::Magnet("magnet:?xt=urn:btih:aa".to_owned())
+            parse(" magnet:?xt=urn:btih:aa "),
+            Ok(AddSource::Magnet("magnet:?xt=urn:btih:aa".to_owned()))
         );
     }
 
     #[test]
-    fn classifies_http_sources() {
+    fn parses_http_sources() {
+        assert_eq!(
+            parse("https://example.org/file.torrent"),
+            Ok(AddSource::Url(
+                "https://example.org/file.torrent".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn parses_files() {
+        assert_eq!(
+            parse("./debian.torrent"),
+            Ok(AddSource::File(PathBuf::from("./debian.torrent")))
+        );
+    }
+
+    #[test]
+    fn expands_tilde_and_strips_quotes() {
+        assert_eq!(
+            parse("\"~/Downloads/debian.torrent\""),
+            Ok(AddSource::File(PathBuf::from(
+                "/home/user/Downloads/debian.torrent"
+            )))
+        );
+        assert_eq!(
+            parse("'/tmp/a b.torrent'"),
+            Ok(AddSource::File(PathBuf::from("/tmp/a b.torrent")))
+        );
+    }
+
+    #[test]
+    fn parses_file_urls_with_percent_encoding() {
+        assert_eq!(
+            parse("file:///tmp/My%20File.torrent"),
+            Ok(AddSource::File(PathBuf::from("/tmp/My File.torrent")))
+        );
+    }
+
+    #[test]
+    fn rejects_empty_and_control_characters() {
+        assert_eq!(parse("   "), Err(SourceError::Empty));
+        assert_eq!(
+            parse("magnet:?xt=aa\nbb"),
+            Err(SourceError::ControlCharacters)
+        );
+    }
+
+    #[test]
+    fn rejects_oversized_sources() {
+        let huge = "a".repeat(MAX_SOURCE_LEN + 1);
+        assert_eq!(parse(&huge), Err(SourceError::TooLong));
+    }
+
+    #[test]
+    fn rejects_invalid_file_urls() {
         assert!(matches!(
-            AddSource::classify("https://example.org/file.torrent"),
-            AddSource::Url(_)
+            parse("file://relative"),
+            Err(SourceError::InvalidFileUrl(_))
         ));
-    }
-
-    #[test]
-    fn classifies_files() {
-        assert_eq!(
-            AddSource::classify("./debian.torrent"),
-            AddSource::File(PathBuf::from("./debian.torrent"))
-        );
     }
 
     #[tokio::test]

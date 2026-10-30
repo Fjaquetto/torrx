@@ -16,7 +16,7 @@ const WIDTH: u16 = 132;
 const HEIGHT: u16 = 24;
 
 fn main() -> anyhow::Result<()> {
-    let mut app = App::new("balanced", true);
+    let mut app = App::new("balanced", true, None);
 
     let torrents = vec![
         torrent(
