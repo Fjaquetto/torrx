@@ -68,10 +68,7 @@ impl AddSource {
         if value.starts_with("file://") {
             let url = Url::parse(value)
                 .map_err(|error| SourceError::InvalidFileUrl(error.to_string()))?;
-            let path = url
-                .to_file_path()
-                .map_err(|()| SourceError::InvalidFileUrl("not a local file path".to_owned()))?;
-            return Ok(Self::File(path));
+            return Ok(Self::File(file_url_to_path(&url)?));
         }
         if value.starts_with("http://") || value.starts_with("https://") {
             return Ok(Self::Url(value.to_owned()));
@@ -94,6 +91,39 @@ fn strip_wrapping_quotes(value: &str) -> &str {
         }
     }
     value
+}
+
+fn file_url_to_path(url: &Url) -> Result<PathBuf, SourceError> {
+    let host = url.host_str().unwrap_or_default();
+    if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") {
+        return Err(SourceError::InvalidFileUrl(format!(
+            "remote host '{host}' is not supported"
+        )));
+    }
+    if !is_local_file_path(url.path()) {
+        return Err(SourceError::InvalidFileUrl(
+            "expected an absolute file:///path".to_owned(),
+        ));
+    }
+    url.to_file_path()
+        .map_err(|()| SourceError::InvalidFileUrl("not a local file path".to_owned()))
+}
+
+fn is_local_file_path(path: &str) -> bool {
+    if cfg!(windows) {
+        is_windows_local_file_path(path)
+    } else {
+        path.starts_with('/')
+    }
+}
+
+fn is_windows_local_file_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    path.len() >= 4
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_alphabetic()
+        && bytes[2] == b':'
+        && bytes[3] == b'/'
 }
 
 #[derive(Debug, Clone, Default)]
@@ -186,9 +216,15 @@ mod tests {
 
     #[test]
     fn parses_file_urls_with_percent_encoding() {
+        let path = if cfg!(windows) {
+            PathBuf::from(r"C:\torrx tests\My File.torrent")
+        } else {
+            PathBuf::from("/tmp/My File.torrent")
+        };
+        let url = Url::from_file_path(&path).expect("absolute path becomes a file URL");
         assert_eq!(
-            parse("file:///tmp/My%20File.torrent"),
-            Ok(AddSource::File(PathBuf::from("/tmp/My File.torrent")))
+            AddSource::parse(url.as_str(), None),
+            Ok(AddSource::File(path))
         );
     }
 
@@ -213,6 +249,29 @@ mod tests {
             parse("file://relative"),
             Err(SourceError::InvalidFileUrl(_))
         ));
+        assert!(matches!(
+            parse("file://example.com/share/file.torrent"),
+            Err(SourceError::InvalidFileUrl(_))
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_unix_style_file_urls_on_windows() {
+        assert!(matches!(
+            parse("file:///tmp/My%20File.torrent"),
+            Err(SourceError::InvalidFileUrl(_))
+        ));
+    }
+
+    #[test]
+    fn windows_file_paths_require_a_drive_letter() {
+        assert!(is_windows_local_file_path("/C:/Users/file.torrent"));
+        assert!(is_windows_local_file_path("/d:/data/file.torrent"));
+        assert!(!is_windows_local_file_path("/tmp/file.torrent"));
+        assert!(!is_windows_local_file_path("/C:"));
+        assert!(!is_windows_local_file_path("C:/file.torrent"));
+        assert!(!is_windows_local_file_path("/1:/file.torrent"));
     }
 
     #[tokio::test]
