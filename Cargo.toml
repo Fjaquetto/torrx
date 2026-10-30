@@ -1,0 +1,66 @@
+[package]
+name = "torrx"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Fast, secure and minimal BitTorrent client for the terminal"
+license = "MIT"
+readme = "README.md"
+keywords = ["torrent", "bittorrent", "tui", "cli", "p2p"]
+categories = ["command-line-utilities"]
+
+[workspace]
+members = ["xtask"]
+resolver = "2"
+
+[dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+clap = { version = "4.6", features = ["derive", "wrap_help"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
+directories = "6.0"
+futures-util = "0.3"
+librqbit = { version = "9.0.1", default-features = false, features = ["rust-tls"] }
+ratatui = { version = "0.30", features = ["crossterm_0_29"] }
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+tokio = { version = "1.53", features = [
+    "rt-multi-thread",
+    "macros",
+    "signal",
+    "time",
+    "sync",
+    "net",
+] }
+toml = "1.1"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-width = "0.2"
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+similar_names = "allow"
+struct_excessive_bools = "allow"
+too_many_lines = "allow"
+cast_precision_loss = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
