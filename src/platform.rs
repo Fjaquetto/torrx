@@ -36,16 +36,10 @@ fn first_uid_is_root(status: &str) -> bool {
         .is_some_and(|uid| uid == "0")
 }
 
-#[cfg(unix)]
 fn restrict_to_owner(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-}
-
-#[cfg(not(unix))]
-fn restrict_to_owner(_path: &Path) -> io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]
@@ -82,7 +76,6 @@ mod tests {
         assert!(!first_uid_is_root(""));
     }
 
-    #[cfg(unix)]
     #[test]
     fn creates_owner_only_directory() {
         use std::os::unix::fs::PermissionsExt;

@@ -6,6 +6,9 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(not(target_os = "linux"))]
+compile_error!("torrx currently supports Linux only");
+
 pub mod app;
 pub mod cli;
 pub mod config;

@@ -55,13 +55,10 @@ pub async fn run_tui(config: &Config, dirs: &AppDirs) -> anyhow::Result<()> {
     result
 }
 
-#[cfg(unix)]
-#[derive(Default)]
 struct TerminationSignal {
     inner: Option<tokio::signal::unix::Signal>,
 }
 
-#[cfg(unix)]
 impl TerminationSignal {
     fn install() -> Self {
         Self {
@@ -74,21 +71,6 @@ impl TerminationSignal {
             signal.recv().await;
             return;
         }
-        std::future::pending::<()>().await;
-    }
-}
-
-#[cfg(not(unix))]
-#[derive(Default)]
-struct TerminationSignal;
-
-#[cfg(not(unix))]
-impl TerminationSignal {
-    fn install() -> Self {
-        Self
-    }
-
-    async fn wait(&mut self) {
         std::future::pending::<()>().await;
     }
 }

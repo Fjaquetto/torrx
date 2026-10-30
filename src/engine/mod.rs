@@ -110,20 +110,7 @@ fn file_url_to_path(url: &Url) -> Result<PathBuf, SourceError> {
 }
 
 fn is_local_file_path(path: &str) -> bool {
-    if cfg!(windows) {
-        is_windows_local_file_path(path)
-    } else {
-        path.starts_with('/')
-    }
-}
-
-fn is_windows_local_file_path(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    path.len() >= 4
-        && bytes[0] == b'/'
-        && bytes[1].is_ascii_alphabetic()
-        && bytes[2] == b':'
-        && bytes[3] == b'/'
+    path.starts_with('/')
 }
 
 #[derive(Debug, Clone, Default)]
@@ -216,11 +203,7 @@ mod tests {
 
     #[test]
     fn parses_file_urls_with_percent_encoding() {
-        let path = if cfg!(windows) {
-            PathBuf::from(r"C:\torrx tests\My File.torrent")
-        } else {
-            PathBuf::from("/tmp/My File.torrent")
-        };
+        let path = PathBuf::from("/tmp/My File.torrent");
         let url = Url::from_file_path(&path).expect("absolute path becomes a file URL");
         assert_eq!(
             AddSource::parse(url.as_str(), None),
@@ -253,25 +236,6 @@ mod tests {
             parse("file://example.com/share/file.torrent"),
             Err(SourceError::InvalidFileUrl(_))
         ));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn rejects_unix_style_file_urls_on_windows() {
-        assert!(matches!(
-            parse("file:///tmp/My%20File.torrent"),
-            Err(SourceError::InvalidFileUrl(_))
-        ));
-    }
-
-    #[test]
-    fn windows_file_paths_require_a_drive_letter() {
-        assert!(is_windows_local_file_path("/C:/Users/file.torrent"));
-        assert!(is_windows_local_file_path("/d:/data/file.torrent"));
-        assert!(!is_windows_local_file_path("/tmp/file.torrent"));
-        assert!(!is_windows_local_file_path("/C:"));
-        assert!(!is_windows_local_file_path("C:/file.torrent"));
-        assert!(!is_windows_local_file_path("/1:/file.torrent"));
     }
 
     #[tokio::test]

@@ -36,7 +36,8 @@ plus headless subcommands for scripts.
 
 ## Install
 
-Requires a Rust toolchain (stable). Build from source:
+`torrx` currently targets **Linux only** (x86_64 and aarch64). Requires a Rust
+toolchain (stable). Build from source:
 
 ```sh
 cargo install --path .          # or: cargo build --release
@@ -199,9 +200,9 @@ Design rules:
 Merging `develop` into `main` runs `.github/workflows/release.yml`: it validates
 the tree, analyzes Conventional Commits since the last tag, bumps `Cargo.toml`,
 updates `CHANGELOG.md`, creates an annotated `vX.Y.Z` tag and publishes the
-GitHub release with Linux (gnu/musl, x86_64/aarch64), macOS (x86_64/arm64) and
-Windows binaries plus `sha256` checksums. A back-merge keeps `develop` in sync.
-The first release (`v0.1.0`) is tagged manually to bootstrap the sequence.
+GitHub release with Linux binaries (gnu and static musl, x86_64 and aarch64)
+plus `sha256` checksums. A back-merge keeps `develop` in sync. The first release
+(`v0.1.0`) is tagged manually to bootstrap the sequence.
 
 The bot pushes the release commit to `main`/`develop`, so GitHub Actions needs a
 ruleset bypass on those branches (or a `RELEASE_TOKEN` secret with the bypass).
